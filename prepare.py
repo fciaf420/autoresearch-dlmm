@@ -188,6 +188,18 @@ def get_pool_runtime_config(pool_info: dict) -> dict:
         ),
     }
 
+
+def filter_lpers_for_horizon(lpers_df: pd.DataFrame, horizon_mode: str) -> pd.DataFrame:
+    """Filter LP benchmarks to the target hold horizon when hold-time data exists."""
+    if lpers_df.empty or "avg_age_hour" not in lpers_df.columns:
+        return lpers_df
+
+    min_hours, max_hours = config.benchmark_filter_range(horizon_mode)
+    filtered = lpers_df[
+        lpers_df["avg_age_hour"].between(min_hours, max_hours, inclusive="both")
+    ].copy()
+    return filtered if not filtered.empty else lpers_df
+
 def process_ohlcv(raw_candles: list) -> pd.DataFrame:
     """Convert raw OHLCV to a clean DataFrame."""
     if not raw_candles:
@@ -268,7 +280,7 @@ def process_top_lpers(raw_lpers: list) -> pd.DataFrame:
     return df
 
 
-def extract_lper_features(lpers_df: pd.DataFrame) -> dict:
+def extract_lper_features(lpers_df: pd.DataFrame, horizon_mode: str = None) -> dict:
     """
     Extract aggregate features from top LPers for the agent to use.
     These become the "benchmark" the strategy tries to beat.
@@ -276,8 +288,15 @@ def extract_lper_features(lpers_df: pd.DataFrame) -> dict:
     if lpers_df.empty:
         return {}
 
+    horizon_mode = config.normalize_horizon_mode(horizon_mode)
+    filtered_lpers = filter_lpers_for_horizon(lpers_df, horizon_mode)
+
     # Filter to profitable LPers only
-    profitable = lpers_df[lpers_df["total_pnl"] > 0] if "total_pnl" in lpers_df.columns else lpers_df
+    profitable = (
+        filtered_lpers[filtered_lpers["total_pnl"] > 0]
+        if "total_pnl" in filtered_lpers.columns
+        else filtered_lpers
+    )
 
     features = {}
 
@@ -299,8 +318,12 @@ def extract_lper_features(lpers_df: pd.DataFrame) -> dict:
             features["best_lp_apr"] = float(best.get("apr", 0))
             features["best_lp_positions"] = int(best.get("total_lp", 0))
 
-    features["total_lpers_analyzed"] = len(lpers_df)
+    features["total_lpers_analyzed"] = len(filtered_lpers)
+    features["total_lpers_raw"] = len(lpers_df)
     features["profitable_lpers"] = len(profitable) if not profitable.empty else 0
+    features["benchmark_horizon_mode"] = horizon_mode
+    features["benchmark_hold_min_hours"], features["benchmark_hold_max_hours"] = \
+        config.benchmark_filter_range(horizon_mode)
 
     return features
 
@@ -355,7 +378,8 @@ def compute_metrics(results: dict) -> dict:
 
 def save_data(pool_address: str, pool_info: dict, candles: pd.DataFrame,
               volume: pd.DataFrame, top_lpers: pd.DataFrame = None,
-              lper_features: dict = None, lper_positions: dict = None):
+              lper_features: dict = None, lper_positions: dict = None,
+              run_config: dict = None):
     """Cache all fetched data locally."""
     pool_dir = config.DATA_DIR / pool_address[:12]
     pool_dir.mkdir(parents=True, exist_ok=True)
@@ -377,11 +401,15 @@ def save_data(pool_address: str, pool_info: dict, candles: pd.DataFrame,
         with open(pool_dir / "lper_positions.json", "w") as f:
             json.dump(lper_positions, f, indent=2, default=str)
 
+    if run_config:
+        with open(pool_dir / "run_config.json", "w") as f:
+            json.dump(run_config, f, indent=2)
+
     print(f"\nData saved to {pool_dir}/")
 
 
 def load_data(pool_address: str):
-    """Load cached data. Returns tuple of (pool_info, candles, volume, lper_features)."""
+    """Load cached data."""
     pool_dir = config.DATA_DIR / pool_address[:12]
     if not pool_dir.exists():
         raise FileNotFoundError(
@@ -411,7 +439,13 @@ def load_data(pool_address: str):
         with open(pos_path) as f:
             lper_positions = json.load(f)
 
-    return pool_info, candles, volume, lper_features, top_lpers, lper_positions
+    run_config = {}
+    run_config_path = pool_dir / "run_config.json"
+    if run_config_path.exists():
+        with open(run_config_path) as f:
+            run_config = json.load(f)
+
+    return pool_info, candles, volume, lper_features, top_lpers, lper_positions, run_config
 
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
@@ -421,13 +455,26 @@ def main():
     if "--pool" in sys.argv:
         pool_address = sys.argv[sys.argv.index("--pool") + 1]
 
-    days_back = config.BACKTEST_DAYS
-    if "--days" in sys.argv:
-        days_back = int(sys.argv[sys.argv.index("--days") + 1])
+    horizon_mode = config.HORIZON_MODE
+    if "--horizon" in sys.argv:
+        horizon_mode = sys.argv[sys.argv.index("--horizon") + 1]
 
-    timeframe = config.BACKTEST_TIMEFRAME
+    days_override = None
+    if "--days" in sys.argv:
+        days_override = int(sys.argv[sys.argv.index("--days") + 1])
+
+    timeframe_override = None
     if "--timeframe" in sys.argv:
-        timeframe = sys.argv[sys.argv.index("--timeframe") + 1]
+        timeframe_override = sys.argv[sys.argv.index("--timeframe") + 1]
+
+    horizon = config.resolve_horizon_settings(
+        horizon_mode,
+        timeframe=timeframe_override,
+        days=days_override,
+    )
+    horizon_mode = horizon["mode"]
+    days_back = horizon["days"]
+    timeframe = horizon["timeframe"]
 
     top_n_wallets = 5  # How many top wallets to deep-dive
     if "--top-wallets" in sys.argv:
@@ -439,6 +486,7 @@ def main():
     print("  DLMM Autoresearch — Data Preparation")
     print("=" * 60)
     print(f"  Pool:       {pool_address}")
+    print(f"  Horizon:    {horizon_mode}")
     print(f"  History:    {days_back} days")
     print(f"  Timeframe:  {timeframe}")
     print(f"  LP Agent:   {'SKIP' if skip_lp else f'{len(config.keys.keys)} keys ({config.keys.total_rpm} RPM)'}")
@@ -484,7 +532,8 @@ def main():
             raw_lpers = fetch_top_lpers(pool_address, order_by="total_pnl",
                                          sort_order="desc", limit=50, pages=2)
             top_lpers_df = process_top_lpers(raw_lpers)
-            lper_features = extract_lper_features(top_lpers_df)
+            lper_features = extract_lper_features(top_lpers_df, horizon_mode=horizon_mode)
+            horizon_lpers_df = filter_lpers_for_horizon(top_lpers_df, horizon_mode)
 
             if not top_lpers_df.empty:
                 print(f"\n  Top LPer benchmarks:")
@@ -495,7 +544,7 @@ def main():
                         print(f"    {key}: {val}")
 
                 # Deep-dive: fetch positions for top N wallets
-                top_wallets = top_lpers_df.head(top_n_wallets)["owner"].tolist()
+                top_wallets = horizon_lpers_df.head(top_n_wallets)["owner"].tolist()
                 print(f"\n  Fetching positions for top {len(top_wallets)} wallets...")
 
                 for wallet in top_wallets:
@@ -527,8 +576,16 @@ def main():
         print("  Add keys to .env to enable. See .env.example")
 
     # ── Save everything ──
+    run_config = {
+        "pool_address": pool_address,
+        "horizon_mode": horizon_mode,
+        "days": days_back,
+        "timeframe": timeframe,
+        "top_wallets": top_n_wallets,
+        "skip_lp": skip_lp,
+    }
     save_data(pool_address, pool_info, candles, volume,
-              top_lpers_df, lper_features, lper_positions)
+              top_lpers_df, lper_features, lper_positions, run_config=run_config)
 
     # ── Summary ──
     train, val = split_data(candles)

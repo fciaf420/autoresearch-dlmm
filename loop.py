@@ -47,6 +47,11 @@ LOOP_PROMPT_DIR = config.EXPERIMENTS_DIR / "loop_prompts"
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run autonomous DLMM strategy iterations.")
     parser.add_argument("--pool", default=config.DEFAULT_POOL, help="Pool address to optimize.")
+    parser.add_argument(
+        "--horizon",
+        default=config.HORIZON_MODE,
+        help=f"Horizon mode: {', '.join(sorted(config.HORIZON_PRESETS))}",
+    )
     parser.add_argument("--rounds", type=int, default=10, help="Maximum experiment rounds.")
     parser.add_argument(
         "--agent-cmd",
@@ -70,10 +75,10 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Automatically run prepare.py if cached data for the pool is missing.",
     )
-    parser.add_argument("--days", type=int, default=config.BACKTEST_DAYS, help="Prepare lookback days.")
+    parser.add_argument("--days", type=int, default=None, help="Prepare lookback days.")
     parser.add_argument(
         "--timeframe",
-        default=config.BACKTEST_TIMEFRAME,
+        default=None,
         help="Prepare timeframe, for example 1h or 15m.",
     )
     parser.add_argument(
@@ -99,15 +104,18 @@ def ensure_cached_data(args: argparse.Namespace) -> None:
             f"No cached data for {args.pool}. Run prepare.py first or pass --prepare-if-missing."
         )
 
+    horizon = config.resolve_horizon_settings(args.horizon, timeframe=args.timeframe, days=args.days)
     cmd = [
         sys.executable,
         "prepare.py",
         "--pool",
         args.pool,
+        "--horizon",
+        horizon["mode"],
         "--days",
-        str(args.days),
+        str(horizon["days"]),
         "--timeframe",
-        args.timeframe,
+        horizon["timeframe"],
         "--top-wallets",
         str(args.top_wallets),
     ]
@@ -152,10 +160,19 @@ def latest_val_result(before: set[str] | None = None) -> Path:
     return candidates[-1]
 
 
-def run_backtest(pool_address: str) -> tuple[dict, Path]:
+def run_backtest(pool_address: str, horizon_mode: str) -> tuple[dict, Path]:
     config.EXPERIMENTS_DIR.mkdir(exist_ok=True)
     before = {path.name for path in config.EXPERIMENTS_DIR.glob("*_val.json")}
-    command = [sys.executable, "backtest.py", "--split", "both", "--pool", pool_address]
+    command = [
+        sys.executable,
+        "backtest.py",
+        "--split",
+        "both",
+        "--pool",
+        pool_address,
+        "--horizon",
+        horizon_mode,
+    ]
     run_command(command, "backtest.py")
     val_file = latest_val_result(before)
     with open(val_file) as f:
@@ -198,6 +215,7 @@ def build_prompt(
 
 Round: {round_num}
 Pool: {args.pool}
+Horizon mode: {args.horizon}
 Current best validation net_pnl_pct: {best_val:+.4f}%
 Last attempted validation net_pnl_pct: {last_val:+.4f}%
 
@@ -254,13 +272,14 @@ def main() -> None:
     print("  DLMM Autoresearch — Autonomous Loop")
     print("=" * 60)
     print(f"  Pool:       {args.pool}")
+    print(f"  Horizon:    {config.normalize_horizon_mode(args.horizon)}")
     print(f"  Rounds:     {args.rounds}")
     print(f"  Sleep:      {args.sleep_seconds:.1f}s")
     print(f"  Strategy:   {STRATEGY_FILE}")
     print()
 
     best_source = STRATEGY_FILE.read_text()
-    baseline_metrics, baseline_file = run_backtest(args.pool)
+    baseline_metrics, baseline_file = run_backtest(args.pool, config.normalize_horizon_mode(args.horizon))
     best_val = baseline_metrics["net_pnl_pct"]
     last_val = best_val
 
@@ -315,7 +334,7 @@ def main() -> None:
                 time.sleep(args.sleep_seconds)
             continue
 
-        metrics, val_file = run_backtest(args.pool)
+        metrics, val_file = run_backtest(args.pool, config.normalize_horizon_mode(args.horizon))
         last_val = metrics["net_pnl_pct"]
         improved = last_val > (best_val + args.min_improvement)
 

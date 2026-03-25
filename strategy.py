@@ -21,12 +21,43 @@ import config
 # ─── Top LP Benchmarks (injected by backtest.py) ─────────────────────────────
 
 BENCHMARK = {}
+RUNTIME_CONTEXT = {
+    "horizon_mode": config.HORIZON_MODE,
+    "timeframe": config.BACKTEST_TIMEFRAME,
+}
+
+_BASELINE_DEFAULTS = {
+    "NUM_BINS": 69,
+    "SHAPE": "spot",
+    "REBALANCE_THRESHOLD": 0.7,
+    "MIN_CANDLES_BETWEEN_REBALANCE": 6,
+    "MA_WINDOW": 20,
+    "VOLATILITY_WINDOW": 12,
+}
 
 
 def set_benchmark(features: dict | None):
     """Inject pool-specific benchmark data for the active backtest run."""
     global BENCHMARK
     BENCHMARK = dict(features or {})
+
+
+def set_runtime_context(context: dict | None):
+    """Inject active horizon/timeframe and apply horizon defaults when untouched."""
+    global RUNTIME_CONTEXT
+    context = dict(context or {})
+    horizon_mode = config.normalize_horizon_mode(context.get("horizon_mode"))
+    settings = config.resolve_horizon_settings(horizon_mode)
+    RUNTIME_CONTEXT = {
+        "horizon_mode": horizon_mode,
+        "timeframe": context.get("timeframe", settings["timeframe"]),
+    }
+
+    strategy_defaults = settings["strategy"]
+    globals_ref = globals()
+    for key, baseline in _BASELINE_DEFAULTS.items():
+        if globals_ref.get(key) == baseline:
+            globals_ref[key] = strategy_defaults[key]
 
 # ─── Strategy Parameters (AGENT: tune these) ─────────────────────────────────
 
@@ -72,6 +103,7 @@ def strategy(state, pool, candle, candle_idx) -> dict:
         BENCHMARK.get("top_lp_median_avg_age_hour")
         BENCHMARK.get("top_lp_median_win_rate")
         BENCHMARK.get("top_lp_median_fee_percent")
+        BENCHMARK.get("benchmark_horizon_mode")
     """
     global _last_rebalance_idx, _price_history
 

@@ -130,6 +130,7 @@ def save_results(
     run_id,
     pool_address,
     pool_config,
+    run_config,
     split_candles,
     strategy_module,
     lper_features=None,
@@ -162,6 +163,7 @@ def save_results(
         run_id=run_id,
         pool_address=pool_address,
         pool_config=pool_config,
+        run_config=run_config,
         label=label,
         metrics=metrics,
         strategy_source=strategy_source,
@@ -182,14 +184,27 @@ def main():
     if "--pool" in sys.argv:
         pool_address = sys.argv[sys.argv.index("--pool") + 1]
 
+    horizon_override = None
+    if "--horizon" in sys.argv:
+        horizon_override = sys.argv[sys.argv.index("--horizon") + 1]
+
     split_mode = "both"
     if "--split" in sys.argv:
         split_mode = sys.argv[sys.argv.index("--split") + 1]
 
     # Load all data
     print("Loading cached data...")
-    pool_info, candles, volume, lper_features, top_lpers, lper_positions = \
+    pool_info, candles, volume, lper_features, top_lpers, lper_positions, run_config = \
         load_data(pool_address)
+    if horizon_override:
+        run_config = dict(run_config or {})
+        run_config["horizon_mode"] = config.normalize_horizon_mode(horizon_override)
+    else:
+        run_config = dict(run_config or {})
+        run_config["horizon_mode"] = config.normalize_horizon_mode(
+            run_config.get("horizon_mode", config.HORIZON_MODE)
+        )
+    run_config["timeframe"] = run_config.get("timeframe", config.BACKTEST_TIMEFRAME)
     pool_config = make_pool_config(pool_info)
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -197,6 +212,10 @@ def main():
         f"Pool: {pool_config.name} | Bin Step: {pool_config.bin_step_bps} bps | "
         f"Base Fee: {pool_config.base_fee_bps:.3f}% | "
         f"Protocol Fee: {pool_config.protocol_fee_pct:.1f}%"
+    )
+    print(
+        f"Horizon: {run_config['horizon_mode']} | "
+        f"Prepared timeframe: {run_config.get('timeframe', 'unknown')}"
     )
     print(f"Candles: {len(candles)} total")
     if lper_features:
@@ -212,6 +231,8 @@ def main():
         strategy.set_benchmark(lper_features)
     else:
         strategy.BENCHMARK = lper_features or {}
+    if hasattr(strategy, "set_runtime_context"):
+        strategy.set_runtime_context(run_config)
     strategy_fn = strategy.strategy
 
     print(f"\n--- Strategy Parameters ---")
@@ -235,6 +256,7 @@ def main():
             run_id,
             pool_address,
             pool_config,
+            run_config,
             train,
             strategy,
             lper_features,
@@ -249,6 +271,7 @@ def main():
             run_id,
             pool_address,
             pool_config,
+            run_config,
             val,
             strategy,
             lper_features,

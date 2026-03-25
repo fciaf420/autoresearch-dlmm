@@ -2,7 +2,7 @@
 
 Autonomous AI research for **Meteora DLMM** LP strategy optimization on Solana. Inspired by [Karpathy's autoresearch](https://github.com/karpathy/autoresearch).
 
-This repo is adapted from [miolini/autoresearch-macos](https://github.com/miolini/autoresearch-macos) for DLMM data prep, backtesting, and strategy iteration.
+This repo is adapted from [miolini/autoresearch-macos](https://github.com/miolini/autoresearch-macos) for DLMM data prep, backtesting, strategy iteration, and now horizon-aware autonomous loops.
 
 Give an AI agent a DLMM backtesting setup and let it experiment autonomously. It modifies the LP strategy, backtests against historical candle data, checks if net P&L improved, keeps or discards the change, and repeats. In `v2`, those experiments also build a lightweight memory so the agent can learn from prior runs instead of searching blind every time.
 
@@ -16,7 +16,7 @@ Give an AI agent a DLMM backtesting setup and let it experiment autonomously. It
 | `backtest.py` | Nobody | Runs strategy, reports metrics, compares to top LP benchmarks |
 | `loop.py` | Nobody | Runs the autonomous keep/revert loop for one selected pool |
 | `memory.py` | Nobody | Stores structured experiment history and generates the v2 learning report |
-| `config.py` | Nobody | Environment config, API key rotation |
+| `config.py` | Nobody | Environment config, API key rotation, and horizon presets |
 | `program.md` | **Human** | Instructions for the AI agent |
 
 The agent iterates on `strategy.py` to maximize **val net_pnl_pct** — net profit (fees minus impermanent loss) as a percentage of initial capital on held-out validation data.
@@ -51,37 +51,100 @@ cp .env.example .env
 # Edit .env and add your LP Agent API key(s)
 # Get keys at: https://lpagent.mintlify.app/api-key-dashboard/dashboard
 
-# 4. Fetch data (default: SOL/USDC, 30 days, 1h candles)
+# 4. Fetch data (default horizon: swing)
 uv run prepare.py
 
 # 5. Run baseline backtest
 uv run backtest.py
 
 # 6. Run the autonomous loop
-# Example agent command shown with Codex-style placeholder usage
-uv run loop.py --pool <POOL_ADDRESS> --rounds 20 \
+uv run loop.py --rounds 20 \
   --agent-cmd 'codex exec $(cat {prompt_file})'
 ```
 
-### Custom Pools and Timeframes
+## Horizon Modes
+
+The repo is single-pool per run, but it is horizon-aware. Use `--horizon` to tell the system whether you are optimizing for short LPs or slow multi-day holds.
+
+Supported modes:
+
+- `scalp`: `5m` candles, 7-day lookback, benchmark LPs held roughly `0` to `6` hours
+- `intraday`: `30m` candles, 14-day lookback, benchmark LPs held roughly `6` to `36` hours
+- `swing`: `1h` candles, 30-day lookback, benchmark LPs held roughly `36` to `168` hours
+- `7d_hold`: `1h` candles, 45-day lookback, benchmark LPs held roughly `72` to `240` hours
+
+If you also pass `--days` or `--timeframe`, those explicit flags override the preset defaults.
+
+## Common Commands
+
+### Default run
 
 ```bash
-# Different pool
-uv run prepare.py --pool <POOL_ADDRESS>
-uv run backtest.py --pool <POOL_ADDRESS>
+uv run prepare.py
+uv run backtest.py --split both
 
-# More history, different candles
-uv run prepare.py --days 60 --timeframe 15m
-
-# Analyze more top wallets for a custom pool
-uv run prepare.py --pool <POOL_ADDRESS> --top-wallets 10
-
-# Skip LP Agent data (Meteora only)
-uv run prepare.py --skip-lp
+uv run loop.py --rounds 20 \
+  --agent-cmd 'codex exec $(cat {prompt_file})'
 ```
 
-When you switch pools, run both `prepare.py` and `backtest.py` with the same `--pool` so cached candles and LP benchmarks stay aligned.
-The autonomous loop is also single-pool per run, so use one `loop.py --pool ...` process per meme pool.
+### Multi-day meme pool
+
+```bash
+uv run prepare.py \
+  --pool 81GpCm4d13y8TozYtThabuSCLQN2o3bbrvDogXFPn8sA \
+  --horizon 7d_hold
+
+uv run backtest.py \
+  --pool 81GpCm4d13y8TozYtThabuSCLQN2o3bbrvDogXFPn8sA \
+  --horizon 7d_hold \
+  --split both
+
+uv run loop.py \
+  --pool 81GpCm4d13y8TozYtThabuSCLQN2o3bbrvDogXFPn8sA \
+  --horizon 7d_hold \
+  --rounds 25 \
+  --sleep-seconds 300 \
+  --agent-cmd 'codex exec $(cat {prompt_file})'
+```
+
+### Fast meme pool
+
+```bash
+uv run prepare.py --pool <POOL_ADDRESS> --horizon scalp
+uv run backtest.py --pool <POOL_ADDRESS> --horizon scalp --split both
+```
+
+When you switch pools, run `prepare.py`, `backtest.py`, and `loop.py` with the same `--pool`. When you switch hold style, use the same `--horizon` across all three commands so cached candles, benchmark filtering, and strategy defaults stay aligned.
+
+## Flag Reference
+
+### `prepare.py`
+
+- `--pool <POOL_ADDRESS>`: choose the pool to cache and benchmark
+- `--horizon <MODE>`: one of `scalp`, `intraday`, `swing`, `7d_hold`
+- `--days <N>`: override the preset lookback window
+- `--timeframe <5m|30m|1h|2h|4h|12h|24h>`: override the preset candle resolution
+- `--top-wallets <N>`: number of top LP wallets to deep-dive for position history
+- `--skip-lp`: skip LP Agent and fetch only Meteora market data
+
+### `backtest.py`
+
+- `--pool <POOL_ADDRESS>`: choose which cached pool to evaluate
+- `--horizon <MODE>`: inject the horizon mode into strategy defaults and reporting
+- `--split <train|val|both>`: choose which split(s) to run
+
+### `loop.py`
+
+- `--pool <POOL_ADDRESS>`: choose the pool to optimize
+- `--horizon <MODE>`: choose the LP hold style
+- `--rounds <N>`: number of autonomous edit/evaluate rounds
+- `--sleep-seconds <N>`: wait time between rounds; use `300` for a five-minute cadence
+- `--agent-cmd '<CMD>'`: shell command used to invoke your coding agent
+- `--min-improvement <FLOAT>`: minimum validation improvement needed to keep a change
+- `--prepare-if-missing`: auto-run `prepare.py` before the loop if the pool cache does not exist
+- `--days <N>` / `--timeframe <...>`: only used with `--prepare-if-missing`, to override the horizon preset for bootstrap
+- `--top-wallets <N>`: only used with `--prepare-if-missing`
+- `--skip-lp`: only used with `--prepare-if-missing`
 
 ## API Key Rotation
 
@@ -138,13 +201,14 @@ This keeps the project lightweight while making the search process cumulative.
 5. revert regressions automatically
 6. repeat for the requested number of rounds
 
-It is single-pool by design in `v2`, which is usually what you want for meme pools because each pool has very different volatility, fee behavior, and rebalance patterns.
+It is single-pool by design in `v2`, which is usually what you want for meme pools because each pool has very different volatility, fee behavior, and rebalance patterns. The new `--horizon` flag lets the same repo behave very differently for `scalp` versus `7d_hold`.
 
 Example:
 
 ```bash
 uv run loop.py \
   --pool 9d9mb8kooFfaD3SctgZtkxQypkshx6ezhbKio89ixyy2 \
+  --horizon scalp \
   --rounds 25 \
   --sleep-seconds 300 \
   --agent-cmd 'codex exec $(cat {prompt_file})'
@@ -156,7 +220,7 @@ Set `--sleep-seconds 300` if you want a five-minute cadence similar to the origi
 
 This repo started from the `autoresearch-macos` idea of autonomous iteration, but the domain changed from language-model training to DLMM LP optimization.
 
-The `v2` work added four pieces:
+The `v2` work added six pieces:
 
 1. Live-data-safe Meteora integration.
    `prepare.py` now unwraps Meteora response envelopes, parses timestamps safely, and reads pool fee/bin config from `pool_config`.
@@ -172,6 +236,9 @@ The `v2` work added four pieces:
 
 5. An autonomous loop runner.
    `loop.py` shells out to a coding agent, evaluates each proposed strategy change, and automatically keeps or reverts it based on validation performance.
+
+6. Horizon-aware optimization.
+   `config.py` now defines horizon presets, `prepare.py` filters LP benchmarks to matching hold times, `backtest.py` injects the selected horizon into strategy runtime context, and `strategy.py` adopts slower multi-day defaults for modes like `7d_hold` unless the agent has already tuned them away.
 
 ## What the Agent Experiments With
 

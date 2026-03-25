@@ -1,13 +1,12 @@
 """
 config.py — Configuration, environment loading, and API key rotation.
-Supports multiple LP Agent API keys with automatic rotation for rate limiting.
+Supports multiple LP Agent API keys plus horizon-aware defaults.
 """
 
 import os
 import time
 import threading
 from pathlib import Path
-from dataclasses import dataclass, field
 
 
 def _load_env():
@@ -48,6 +47,106 @@ DEFAULT_POOL = os.environ.get("DEFAULT_POOL", "BVRbyLjjfSBcoyiYFuxbgKYnWuiFaF9CS
 BACKTEST_DAYS = int(os.environ.get("BACKTEST_DAYS", "30"))
 BACKTEST_TIMEFRAME = os.environ.get("BACKTEST_TIMEFRAME", "1h")
 INITIAL_CAPITAL = float(os.environ.get("INITIAL_CAPITAL", "1000"))
+HORIZON_MODE = os.environ.get("HORIZON_MODE", "swing")
+
+HORIZON_PRESETS = {
+    "scalp": {
+        "timeframe": "5m",
+        "days": 7,
+        "hold_min_hours": 0.0,
+        "hold_max_hours": 6.0,
+        "strategy": {
+            "NUM_BINS": 45,
+            "SHAPE": "curve",
+            "REBALANCE_THRESHOLD": 0.5,
+            "MIN_CANDLES_BETWEEN_REBALANCE": 6,
+            "MA_WINDOW": 12,
+            "VOLATILITY_WINDOW": 12,
+        },
+    },
+    "intraday": {
+        "timeframe": "30m",
+        "days": 14,
+        "hold_min_hours": 6.0,
+        "hold_max_hours": 36.0,
+        "strategy": {
+            "NUM_BINS": 57,
+            "SHAPE": "spot",
+            "REBALANCE_THRESHOLD": 0.6,
+            "MIN_CANDLES_BETWEEN_REBALANCE": 4,
+            "MA_WINDOW": 16,
+            "VOLATILITY_WINDOW": 16,
+        },
+    },
+    "swing": {
+        "timeframe": "1h",
+        "days": 30,
+        "hold_min_hours": 36.0,
+        "hold_max_hours": 168.0,
+        "strategy": {
+            "NUM_BINS": 81,
+            "SHAPE": "spot",
+            "REBALANCE_THRESHOLD": 0.75,
+            "MIN_CANDLES_BETWEEN_REBALANCE": 12,
+            "MA_WINDOW": 24,
+            "VOLATILITY_WINDOW": 24,
+        },
+    },
+    "7d_hold": {
+        "timeframe": "1h",
+        "days": 45,
+        "hold_min_hours": 72.0,
+        "hold_max_hours": 240.0,
+        "strategy": {
+            "NUM_BINS": 101,
+            "SHAPE": "spot",
+            "REBALANCE_THRESHOLD": 0.82,
+            "MIN_CANDLES_BETWEEN_REBALANCE": 24,
+            "MA_WINDOW": 48,
+            "VOLATILITY_WINDOW": 36,
+        },
+    },
+}
+
+
+def normalize_horizon_mode(mode: str | None) -> str:
+    """Return a supported horizon mode, falling back to the configured default."""
+    mode = (mode or HORIZON_MODE or "swing").strip().lower()
+    if mode not in HORIZON_PRESETS:
+        raise ValueError(
+            f"Unknown horizon mode: {mode}. "
+            f"Supported modes: {', '.join(sorted(HORIZON_PRESETS))}"
+        )
+    return mode
+
+
+def horizon_settings(mode: str | None = None) -> dict:
+    """Return the preset settings for a horizon mode."""
+    return HORIZON_PRESETS[normalize_horizon_mode(mode)].copy()
+
+
+def resolve_horizon_settings(
+    mode: str | None = None,
+    timeframe: str | None = None,
+    days: int | None = None,
+) -> dict:
+    """Resolve timeframe and lookback from the requested horizon plus overrides."""
+    resolved_mode = normalize_horizon_mode(mode)
+    preset = horizon_settings(resolved_mode)
+    return {
+        "mode": resolved_mode,
+        "timeframe": timeframe or preset["timeframe"],
+        "days": int(days if days is not None else preset["days"]),
+        "hold_min_hours": preset["hold_min_hours"],
+        "hold_max_hours": preset["hold_max_hours"],
+        "strategy": dict(preset["strategy"]),
+    }
+
+
+def benchmark_filter_range(mode: str | None = None) -> tuple[float, float]:
+    """Return the benchmark hold window in hours for a horizon mode."""
+    settings = resolve_horizon_settings(mode)
+    return settings["hold_min_hours"], settings["hold_max_hours"]
 
 
 # ─── API Key Manager ─────────────────────────────────────────────────────────
