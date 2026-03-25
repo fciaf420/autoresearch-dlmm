@@ -14,6 +14,7 @@ Give an AI agent a DLMM backtesting setup and let it experiment autonomously. It
 | `simulator.py` | Nobody | DLMM backtesting engine — bin-by-bin fees, IL, position management |
 | `strategy.py` | **AI Agent** | LP strategy: bins, shape, rebalance logic, indicators |
 | `backtest.py` | Nobody | Runs strategy, reports metrics, compares to top LP benchmarks |
+| `loop.py` | Nobody | Runs the autonomous keep/revert loop for one selected pool |
 | `memory.py` | Nobody | Stores structured experiment history and generates the v2 learning report |
 | `config.py` | Nobody | Environment config, API key rotation |
 | `program.md` | **Human** | Instructions for the AI agent |
@@ -55,6 +56,11 @@ uv run prepare.py
 
 # 5. Run baseline backtest
 uv run backtest.py
+
+# 6. Run the autonomous loop
+# Example agent command shown with Codex-style placeholder usage
+uv run loop.py --pool <POOL_ADDRESS> --rounds 20 \
+  --agent-cmd 'codex exec $(cat {prompt_file})'
 ```
 
 ### Custom Pools and Timeframes
@@ -75,6 +81,7 @@ uv run prepare.py --skip-lp
 ```
 
 When you switch pools, run both `prepare.py` and `backtest.py` with the same `--pool` so cached candles and LP benchmarks stay aligned.
+The autonomous loop is also single-pool per run, so use one `loop.py --pool ...` process per meme pool.
 
 ## API Key Rotation
 
@@ -120,6 +127,31 @@ The agent will:
 
 This keeps the project lightweight while making the search process cumulative.
 
+## Autonomous Loop
+
+`loop.py` turns the repo into the full autoresearch workflow:
+
+1. establish a baseline on the current `strategy.py`
+2. hand the next-round prompt to a coding agent
+3. run `backtest.py --split both`
+4. keep the strategy change only if validation improves
+5. revert regressions automatically
+6. repeat for the requested number of rounds
+
+It is single-pool by design in `v2`, which is usually what you want for meme pools because each pool has very different volatility, fee behavior, and rebalance patterns.
+
+Example:
+
+```bash
+uv run loop.py \
+  --pool 9d9mb8kooFfaD3SctgZtkxQypkshx6ezhbKio89ixyy2 \
+  --rounds 25 \
+  --sleep-seconds 300 \
+  --agent-cmd 'codex exec $(cat {prompt_file})'
+```
+
+Set `--sleep-seconds 300` if you want a five-minute cadence similar to the original training loop. Leave it at `0` if you want the backtest loop to iterate as fast as the agent can make changes.
+
 ## How v2 Was Built
 
 This repo started from the `autoresearch-macos` idea of autonomous iteration, but the domain changed from language-model training to DLMM LP optimization.
@@ -137,6 +169,9 @@ The `v2` work added four pieces:
 
 4. Agent-readable learning summaries.
    After every backtest, `backtest.py` regenerates `experiments/learning_report.md`, giving the agent a compact view of what has worked so far.
+
+5. An autonomous loop runner.
+   `loop.py` shells out to a coding agent, evaluates each proposed strategy change, and automatically keeps or reverts it based on validation performance.
 
 ## What the Agent Experiments With
 
@@ -167,6 +202,7 @@ prepare.py        — data fetching (Meteora + LP Agent)
 simulator.py      — DLMM backtesting engine
 strategy.py       — LP strategy (agent modifies this)
 backtest.py       — run + report + benchmark comparison
+loop.py           — autonomous single-pool experiment runner
 memory.py         — v2 experiment memory + learning report generation
 program.md        — agent instructions
 .env.example      — API key template

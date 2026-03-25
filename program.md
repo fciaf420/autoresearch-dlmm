@@ -8,6 +8,7 @@ You are an autonomous research agent optimizing a Meteora DLMM liquidity provisi
 - **`simulator.py`** — DLMM backtesting engine. DO NOT modify.
 - **`prepare.py`** — Data fetching + utilities. DO NOT modify.
 - **`backtest.py`** — Runs strategy, reports metrics, compares to benchmarks. DO NOT modify.
+- **`loop.py`** — Autonomous keep/revert orchestrator. DO NOT modify.
 - **`config.py`** — Environment config + API key rotation. DO NOT modify.
 
 ## Data Available
@@ -16,7 +17,7 @@ You are an autonomous research agent optimizing a Meteora DLMM liquidity provisi
 OHLCV candles for the pool, split into train/val sets. Available as columns: `open`, `high`, `low`, `close`, `volume`, `timestamp`.
 
 ### Top LP Benchmarks (LP Agent API)
-The `BENCHMARK` dict in strategy.py is auto-loaded with features extracted from the top-performing LPers on this pool. Use these to calibrate your strategy:
+The `BENCHMARK` dict in strategy.py is injected by `backtest.py` with features extracted from the top-performing LPers on the active pool. Use these to calibrate your strategy:
 
 - `best_lp_apr` — APR of the #1 LPer by PnL
 - `best_lp_win_rate` — their win rate across positions
@@ -35,6 +36,16 @@ Each backtest appends structured records to `experiments/history.jsonl` and refr
 
 - `history.jsonl` stores strategy parameters, pool context, market-regime features, and train/val metrics for every run.
 - `learning_report.md` summarizes the best validation runs, recent experiments, and what shapes/parameter sets have worked so far on this pool.
+
+### Autonomous Loop (v2)
+`loop.py` can run the full autoresearch cycle automatically for one pool at a time:
+
+1. Run a baseline backtest
+2. Ask a coding agent to make one change to `strategy.py`
+3. Re-run the backtest
+4. Keep the change if val net_pnl_pct improves
+5. Revert it if it does not
+6. Repeat for N rounds
 
 ## The Experiment Loop
 
