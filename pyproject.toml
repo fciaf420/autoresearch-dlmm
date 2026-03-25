@@ -1,0 +1,21 @@
+[project]
+name = "autoresearch-dlmm"
+version = "0.1.0"
+description = "Autonomous AI research for Meteora DLMM LP strategy optimization"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+dependencies = [
+    "requests>=2.31.0",
+    "pandas>=2.1.0",
+    "numpy>=1.24.0",
+    "pyarrow>=14.0.0",
+    "matplotlib>=3.8.0",
+    "tabulate>=0.9.0",
+]
+
+[tool.uv]
+dev-dependencies = [
+    "jupyter>=1.0.0",
+    "ipykernel>=6.29.0",
+]

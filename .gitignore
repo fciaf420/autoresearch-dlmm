@@ -1,0 +1,30 @@
+# Environment & secrets
+.env
+
+# Cached data
+data/
+
+# Experiment logs
+experiments/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
