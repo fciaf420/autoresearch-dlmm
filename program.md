@@ -1,6 +1,6 @@
 # DLMM LP Strategy Autoresearch — Agent Program
 
-You are an autonomous research agent optimizing a Meteora DLMM liquidity provision strategy. Your goal is to maximize **val net_pnl_pct** — the net profit (fees minus impermanent loss) as a percentage of initial capital, measured on the held-out validation set.
+You are an autonomous research agent optimizing a Meteora DLMM liquidity provision strategy. Your goal is to maximize the configured **validation objective**. In `v3`, this is usually a rolling-window score such as `rolling_balanced_net_pnl_pct`, which evaluates many fixed-horizon entry starts instead of only one continuous validation path.
 
 ## Your Setup
 
@@ -15,6 +15,8 @@ You are an autonomous research agent optimizing a Meteora DLMM liquidity provisi
 
 ### Candle Data (Meteora API)
 OHLCV candles for the pool, split into train/val sets. Available as columns: `open`, `high`, `low`, `close`, `volume`, `timestamp`.
+
+In `v3`, these candles may be evaluated as many rolling windows inside each split. For example, a `7d_profile` run can score the same strategy across many overlapping 168-hour windows rather than one single path.
 
 ### Top LP Benchmarks (LP Agent API)
 The `BENCHMARK` dict in strategy.py is injected by `backtest.py` with features extracted from the top-performing LPers on the active pool. Use these to calibrate your strategy:
@@ -43,7 +45,7 @@ Each backtest appends structured records to `experiments/history.jsonl` and refr
 1. Run a baseline backtest
 2. Ask a coding agent to make one change to `strategy.py`
 3. Re-run the backtest
-4. Keep the change if val net_pnl_pct improves
+4. Keep the change if the configured validation objective improves
 5. Revert it if it does not
 6. Repeat for N rounds
 
@@ -53,7 +55,7 @@ Each backtest appends structured records to `experiments/history.jsonl` and refr
 2. **Hypothesize** — form a specific hypothesis. Reference benchmark data.
 3. **Modify** `strategy.py` with ONE targeted change
 4. **Run** `uv run backtest.py --split both`
-5. **Evaluate** — compare val net_pnl_pct to previous best. Check benchmark comparison and what the memory report says has or has not worked.
+5. **Evaluate** — compare the validation primary metric to the previous best. Check benchmark comparison, rolling-window robustness, and what the memory report says has or has not worked.
    - If improved → keep the change
    - If worse → revert
 6. **Repeat**
@@ -97,13 +99,22 @@ MIN_CANDLES_BETWEEN_REBALANCE = max(int(median_hold), 1)
 
 ## Metrics
 
-**Primary: val net_pnl_pct** — higher is better.
+**Primary: validation objective** — higher is better.
+
+In `v3`, this is often one of:
+- `rolling_balanced_net_pnl_pct`
+- `rolling_median_net_pnl_pct`
+- `rolling_mean_net_pnl_pct`
+- `rolling_worst_net_pnl_pct`
 
 Secondary:
 - `time_in_range_pct` — low = range too narrow
 - `num_rebalances` — each has real gas cost
 - `fee_per_rebalance` — efficiency metric
 - `gross_apr` vs `net_apr` — gap = IL eating fees
+- `worst_net_pnl_pct` — avoids one lucky start time carrying the result
+- `win_rate_pct` — how often the strategy wins across rolling starts
+- `latest_window_net_pnl_pct` — how it did on the most recent hold window
 
 **Benchmark comparison** is printed automatically by backtest.py when LP data is available.
 **Experiment memory** is refreshed automatically after every run.
@@ -113,13 +124,15 @@ Secondary:
 1. Only modify `strategy.py`
 2. One change at a time
 3. Always run `--split both` to check train and val
-4. Watch for overfitting (train improves, val doesn't)
-5. Read `experiments/learning_report.md` before each change and avoid repeating losing ideas
-6. Keep the function signature: `strategy(state, pool, candle, candle_idx) -> dict`
+4. Prefer the configured rolling evaluation mode when available; do not optimize only for one lucky start time
+5. Watch for overfitting (train improves, val doesn't)
+6. Prefer changes that improve median outcomes without materially worsening worst-case windows
+7. Read `experiments/learning_report.md` before each change and avoid repeating losing ideas
+8. Keep the function signature: `strategy(state, pool, candle, candle_idx) -> dict`
 
 ```bash
 # First experiment — baseline
-uv run backtest.py --split both
+uv run backtest.py --split both --eval-mode rolling
 ```
 
 Find alpha. Beat the benchmarks.

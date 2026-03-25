@@ -48,6 +48,8 @@ BACKTEST_DAYS = int(os.environ.get("BACKTEST_DAYS", "30"))
 BACKTEST_TIMEFRAME = os.environ.get("BACKTEST_TIMEFRAME", "1h")
 INITIAL_CAPITAL = float(os.environ.get("INITIAL_CAPITAL", "1000"))
 HORIZON_MODE = os.environ.get("HORIZON_MODE", "swing")
+DEFAULT_EVAL_MODE = os.environ.get("EVAL_MODE", "rolling")
+DEFAULT_EVAL_OBJECTIVE = os.environ.get("EVAL_OBJECTIVE", "balanced")
 
 HORIZON_PRESETS = {
     "scalp": {
@@ -55,6 +57,8 @@ HORIZON_PRESETS = {
         "days": 7,
         "hold_min_hours": 0.0,
         "hold_max_hours": 6.0,
+        "eval_window_hours": 3.0,
+        "eval_step_hours": 0.5,
         "strategy": {
             "NUM_BINS": 45,
             "SHAPE": "curve",
@@ -69,6 +73,8 @@ HORIZON_PRESETS = {
         "days": 14,
         "hold_min_hours": 6.0,
         "hold_max_hours": 36.0,
+        "eval_window_hours": 18.0,
+        "eval_step_hours": 2.0,
         "strategy": {
             "NUM_BINS": 57,
             "SHAPE": "spot",
@@ -83,6 +89,8 @@ HORIZON_PRESETS = {
         "days": 30,
         "hold_min_hours": 36.0,
         "hold_max_hours": 168.0,
+        "eval_window_hours": 72.0,
+        "eval_step_hours": 6.0,
         "strategy": {
             "NUM_BINS": 81,
             "SHAPE": "spot",
@@ -97,6 +105,8 @@ HORIZON_PRESETS = {
         "days": 45,
         "hold_min_hours": 72.0,
         "hold_max_hours": 240.0,
+        "eval_window_hours": 168.0,
+        "eval_step_hours": 12.0,
         "strategy": {
             "NUM_BINS": 101,
             "SHAPE": "spot",
@@ -144,6 +154,8 @@ def resolve_horizon_settings(
         "days": int(days if days is not None else preset["days"]),
         "hold_min_hours": preset["hold_min_hours"],
         "hold_max_hours": preset["hold_max_hours"],
+        "eval_window_hours": float(preset["eval_window_hours"]),
+        "eval_step_hours": float(preset["eval_step_hours"]),
         "strategy": dict(preset["strategy"]),
     }
 

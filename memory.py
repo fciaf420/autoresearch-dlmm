@@ -20,6 +20,21 @@ HISTORY_FILE = "history.jsonl"
 LEARNING_REPORT = "learning_report.md"
 
 
+def record_primary_metric_name(record: dict[str, Any]) -> str:
+    metrics = record.get("metrics", {})
+    return metrics.get("primary_metric_name", "net_pnl_pct")
+
+
+def record_primary_metric_value(record: dict[str, Any]) -> float:
+    metrics = record.get("metrics", {})
+    return float(metrics.get("primary_metric_value", metrics.get("net_pnl_pct", float("-inf"))))
+
+
+def record_eval_mode(record: dict[str, Any]) -> str:
+    metrics = record.get("metrics", {})
+    return metrics.get("eval_mode", record.get("run_config", {}).get("eval_mode", "split"))
+
+
 def strategy_snapshot(strategy_module) -> dict[str, Any]:
     """Capture the tunable strategy parameters that matter across experiments."""
     keys = [
@@ -165,7 +180,7 @@ def _best_validation_run(records: list[dict[str, Any]]) -> dict[str, Any] | None
     val_records = [r for r in records if r.get("label") in {"val", "validation set"}]
     if not val_records:
         return None
-    return max(val_records, key=lambda r: r.get("metrics", {}).get("net_pnl_pct", float("-inf")))
+    return max(val_records, key=record_primary_metric_value)
 
 
 def _shape_summary(val_records: list[dict[str, Any]]) -> list[tuple[str, int, float]]:
@@ -173,7 +188,7 @@ def _shape_summary(val_records: list[dict[str, Any]]) -> list[tuple[str, int, fl
     for record in val_records:
         params = record.get("strategy_params", {})
         shape = params.get("SHAPE", "unknown")
-        grouped[shape].append(record.get("metrics", {}).get("net_pnl_pct", 0.0))
+        grouped[shape].append(record_primary_metric_value(record))
 
     summary = []
     for shape, vals in grouped.items():
@@ -208,42 +223,68 @@ def render_learning_report(pool_address: str) -> Path:
 
     val_records = [r for r in pool_records if r.get("label") in {"val", "validation set"}]
     train_records = [r for r in pool_records if r.get("label") in {"train", "train set"}]
+    current_eval_mode = pool_records[-1].get("run_config", {}).get("eval_mode", "split")
+    current_objective = pool_records[-1].get("run_config", {}).get("eval_objective", "net_pnl_pct")
+    scoped_val_records = [
+        r for r in val_records
+        if record_eval_mode(r) == current_eval_mode
+        and (
+            current_eval_mode != "rolling"
+            or r.get("metrics", {}).get("rolling_objective", current_objective) == current_objective
+        )
+    ]
+    display_val_records = scoped_val_records or val_records
     lines.extend([
         "## Memory Snapshot",
         "",
         f"- Horizon mode: {pool_records[-1].get('run_config', {}).get('horizon_mode', 'unknown')}",
         f"- Timeframe: {pool_records[-1].get('run_config', {}).get('timeframe', 'unknown')}",
+        f"- Eval mode: {current_eval_mode}",
+        f"- Eval objective: {current_objective}",
         f"- Validation records: {len(val_records)}",
         f"- Train records: {len(train_records)}",
         f"- Unique strategy signatures: {len({r['strategy_signature'] for r in pool_records})}",
         "",
     ])
 
-    best = _best_validation_run(pool_records)
+    best = _best_validation_run(display_val_records)
     if best is not None:
         best_metrics = best.get("metrics", {})
+        best_metric_name = record_primary_metric_name(best)
         lines.extend([
             "## Best Validation Run",
             "",
-            f"- net_pnl_pct: {best_metrics.get('net_pnl_pct', 0.0):+.4f}%",
+            f"- {best_metric_name}: {record_primary_metric_value(best):+.4f}%",
             f"- net_apr: {best_metrics.get('net_apr', 0.0):+.2f}%",
             f"- time_in_range_pct: {best_metrics.get('time_in_range_pct', 0.0):.2f}%",
             f"- num_rebalances: {best_metrics.get('num_rebalances', 0)}",
             f"- strategy params: `{json.dumps(best.get('strategy_params', {}), sort_keys=True)}`",
             "",
         ])
+        if best_metrics.get("eval_mode") == "rolling":
+            lines.extend([
+                f"- median_net_pnl_pct: {best_metrics.get('median_net_pnl_pct', 0.0):+.4f}%",
+                f"- p25_net_pnl_pct: {best_metrics.get('p25_net_pnl_pct', 0.0):+.4f}%",
+                f"- worst_net_pnl_pct: {best_metrics.get('worst_net_pnl_pct', 0.0):+.4f}%",
+                f"- latest_window_net_pnl_pct: {best_metrics.get('latest_window_net_pnl_pct', 0.0):+.4f}%",
+                f"- win_rate_pct: {best_metrics.get('win_rate_pct', 0.0):.2f}%",
+                f"- window_count: {best_metrics.get('window_count', 0)}",
+                "",
+            ])
 
-    if val_records:
+    if display_val_records:
         lines.extend([
             "## What Has Worked So Far",
             "",
         ])
-        for shape, count, avg in _shape_summary(val_records):
-            lines.append(f"- Shape `{shape}`: {count} val runs, avg net_pnl_pct {avg:+.4f}%")
+        for shape, count, avg in _shape_summary(display_val_records):
+            lines.append(
+                f"- Shape `{shape}`: {count} val runs, avg {record_primary_metric_name(display_val_records[-1])} {avg:+.4f}%"
+            )
         lines.append("")
 
         recent = sorted(
-            val_records,
+            display_val_records,
             key=lambda r: r.get("recorded_at", ""),
             reverse=True,
         )[:5]
@@ -258,12 +299,19 @@ def render_learning_report(pool_address: str) -> Path:
             lines.append(
                 "- "
                 f"{record.get('recorded_at', 'unknown')}: "
-                f"net_pnl_pct {metrics.get('net_pnl_pct', 0.0):+.4f}%, "
+                f"{record_primary_metric_name(record)} {record_primary_metric_value(record):+.4f}%, "
                 f"shape={params.get('SHAPE')}, bins={params.get('NUM_BINS')}, "
                 f"rebalance={params.get('REBALANCE_THRESHOLD')}, "
                 f"cooldown={params.get('MIN_CANDLES_BETWEEN_REBALANCE')}, "
                 f"trend={regime.get('trend')}, vol={regime.get('volatility_regime')}"
             )
+            if metrics.get("eval_mode") == "rolling":
+                lines.append(
+                    f"  median={metrics.get('median_net_pnl_pct', 0.0):+.4f}%, "
+                    f"p25={metrics.get('p25_net_pnl_pct', 0.0):+.4f}%, "
+                    f"worst={metrics.get('worst_net_pnl_pct', 0.0):+.4f}%, "
+                    f"win_rate={metrics.get('win_rate_pct', 0.0):.1f}%"
+                )
         lines.append("")
 
         latest = recent[0]

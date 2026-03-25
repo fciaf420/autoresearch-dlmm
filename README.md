@@ -4,7 +4,7 @@ Autonomous AI research for **Meteora DLMM** LP strategy optimization on Solana. 
 
 This repo is adapted from [miolini/autoresearch-macos](https://github.com/miolini/autoresearch-macos) for DLMM data prep, backtesting, strategy iteration, and now horizon-aware autonomous loops.
 
-Give an AI agent a DLMM backtesting setup and let it experiment autonomously. It modifies the LP strategy, backtests against historical candle data, checks if net P&L improved, keeps or discards the change, and repeats. In `v2`, those experiments also build a lightweight memory so the agent can learn from prior runs instead of searching blind every time.
+Give an AI agent a DLMM backtesting setup and let it experiment autonomously. It modifies the LP strategy, backtests against historical candle data, checks if the objective improved, keeps or discards the change, and repeats. In `v2`, those experiments also build a lightweight memory so the agent can learn from prior runs instead of searching blind every time. In `v3`, the objective is no longer just one lucky continuous path: strategies are scored across many fixed-horizon start times.
 
 ## How It Works
 
@@ -19,7 +19,7 @@ Give an AI agent a DLMM backtesting setup and let it experiment autonomously. It
 | `config.py` | Nobody | Environment config, API key rotation, and horizon presets |
 | `program.md` | **Human** | Instructions for the AI agent |
 
-The agent iterates on `strategy.py` to maximize **val net_pnl_pct** — net profit (fees minus impermanent loss) as a percentage of initial capital on held-out validation data.
+The agent iterates on `strategy.py` to maximize a **validation objective**. In `v3`, the default objective is a rolling-window score across many start times, which makes the search more robust than a single held-out path.
 
 ## Data Sources
 
@@ -55,10 +55,11 @@ cp .env.example .env
 uv run prepare.py
 
 # 5. Run baseline backtest
-uv run backtest.py
+uv run backtest.py --eval-mode rolling
 
 # 6. Run the autonomous loop
 uv run loop.py --rounds 20 \
+  --eval-mode rolling \
   --agent-cmd 'codex exec $(cat {prompt_file})'
 ```
 
@@ -77,6 +78,42 @@ Supported modes:
 
 If you also pass `--days` or `--timeframe`, those explicit flags override the preset defaults.
 
+## v3 Evaluation Mode
+
+`v3` adds rolling multi-start evaluation. Instead of asking "did this strategy work on one continuous historical path?", the repo can now:
+
+- sample many entry starts from the prepared candle history
+- run a fixed holding window from each start
+- aggregate the distribution of outcomes
+
+This is the new default when you run `backtest.py` or `loop.py` without overriding `--eval-mode`.
+
+Why it matters:
+
+- it reduces one-path overfitting
+- it makes the score depend on many possible entry times
+- it stops ultra-wide always-in-range strategies from winning by default just because one long sample happened to reward them
+
+The rolling evaluator reports:
+
+- primary score
+- median rolling net P&L
+- average rolling net P&L
+- p25 rolling net P&L
+- worst rolling net P&L
+- latest-window net P&L
+- rolling win rate
+- average time in range
+- average rebalances
+
+For example, `7d_profile` now defaults to:
+
+- rolling window: `168h`
+- new start every: `12h`
+- objective: `balanced`
+
+The `balanced` objective scores a strategy on both the median and lower-quartile outcome, which makes it much harder for one lucky start time to dominate the search.
+
 ## Common Commands
 
 ### Default run
@@ -86,6 +123,7 @@ uv run prepare.py
 uv run backtest.py --split both
 
 uv run loop.py --rounds 20 \
+  --eval-mode rolling \
   --agent-cmd 'codex exec $(cat {prompt_file})'
 ```
 
@@ -99,11 +137,13 @@ uv run prepare.py \
 uv run backtest.py \
   --pool 81GpCm4d13y8TozYtThabuSCLQN2o3bbrvDogXFPn8sA \
   --horizon 7d_profile \
+  --eval-mode rolling \
   --split both
 
 uv run loop.py \
   --pool 81GpCm4d13y8TozYtThabuSCLQN2o3bbrvDogXFPn8sA \
   --horizon 7d_profile \
+  --eval-mode rolling \
   --rounds 25 \
   --sleep-seconds 300 \
   --agent-cmd 'codex exec $(cat {prompt_file})'
@@ -113,7 +153,16 @@ uv run loop.py \
 
 ```bash
 uv run prepare.py --pool <POOL_ADDRESS> --horizon scalp
-uv run backtest.py --pool <POOL_ADDRESS> --horizon scalp --split both
+uv run backtest.py --pool <POOL_ADDRESS> --horizon scalp --eval-mode rolling --window-hours 3 --start-every-hours 0.5 --split both
+```
+
+### Six-hour-old token
+
+If a token is only a few hours old, do not use `7d_profile`. There is not enough history for 7-day rolling windows. Use a short horizon and a shorter rolling window instead:
+
+```bash
+uv run prepare.py --pool 3HPpJBCtbYpt8HwFcx4JHxXfo1jeAhqcbCo3Ez2MdnYw --horizon scalp --days 1 --timeframe 5m
+uv run backtest.py --pool 3HPpJBCtbYpt8HwFcx4JHxXfo1jeAhqcbCo3Ez2MdnYw --horizon scalp --eval-mode rolling --window-hours 3 --start-every-hours 0.5 --split both
 ```
 
 When you switch pools, run `prepare.py`, `backtest.py`, and `loop.py` with the same `--pool`. When you switch hold style, use the same `--horizon` across all three commands so cached candles, benchmark filtering, and strategy defaults stay aligned.
@@ -135,11 +184,19 @@ When you switch pools, run `prepare.py`, `backtest.py`, and `loop.py` with the s
 - `--pool <POOL_ADDRESS>`: choose which cached pool to evaluate
 - `--horizon <MODE>`: inject the horizon mode into strategy defaults and reporting
 - `--split <train|val|both>`: choose which split(s) to run
+- `--eval-mode <split|rolling>`: choose one-path evaluation or multi-start rolling evaluation
+- `--window-hours <N>`: rolling hold window in hours
+- `--start-every-hours <N>`: spacing between rolling start times
+- `--objective <balanced|median|mean|worst>`: primary score used for rolling evaluation
 
 ### `loop.py`
 
 - `--pool <POOL_ADDRESS>`: choose the pool to optimize
 - `--horizon <MODE>`: choose the LP hold style
+- `--eval-mode <split|rolling>`: evaluation mode used by each round
+- `--window-hours <N>`: rolling hold window in hours
+- `--start-every-hours <N>`: spacing between rolling start times
+- `--objective <balanced|median|mean|worst>`: objective that decides keep vs revert
 - `--rounds <N>`: number of autonomous edit/evaluate rounds
 - `--sleep-seconds <N>`: wait time between rounds; use `300` for a five-minute cadence
 - `--agent-cmd '<CMD>'`: shell command used to invoke your coding agent
@@ -193,18 +250,35 @@ The agent will:
 
 This keeps the project lightweight while making the search process cumulative.
 
+## What Changed In v3
+
+`v3` changes how strategies are judged.
+
+- `backtest.py` can now evaluate many fixed-horizon windows instead of only one continuous split
+- the primary score can optimize for robust distributional outcomes, not just one lucky run
+- `loop.py` keeps or reverts changes based on the selected rolling objective
+- the learning report now carries rolling-window context alongside prior experiment memory
+
+The practical effect is that the repo is now closer to a real deployment question:
+
+- "If I started LPing at many different times in this history, how often would this setup have worked?"
+
+instead of only:
+
+- "Did this setup work on this one path?"
+
 ## Autonomous Loop
 
 `loop.py` turns the repo into the full autoresearch workflow:
 
 1. establish a baseline on the current `strategy.py`
 2. hand the next-round prompt to a coding agent
-3. run `backtest.py --split both`
+3. run `backtest.py` with the configured evaluation mode
 4. keep the strategy change only if validation improves
 5. revert regressions automatically
 6. repeat for the requested number of rounds
 
-It is single-pool by design in `v2`, which is usually what you want for meme pools because each pool has very different volatility, fee behavior, and rebalance patterns. The new `--horizon` flag lets the same repo behave very differently for `scalp` versus `7d_profile`.
+It is single-pool by design, which is usually what you want for meme pools because each pool has very different volatility, fee behavior, and rebalance patterns. The `--horizon` flag lets the same repo behave very differently for `scalp` versus `7d_profile`, and `v3` makes the loop judge those profiles across many start times instead of one path.
 
 Example:
 

@@ -402,6 +402,47 @@ def split_data(candles: pd.DataFrame, val_ratio: float = 0.2):
 
 # ─── Evaluation Metric ───────────────────────────────────────────────────────
 
+def timeframe_to_hours(timeframe: str) -> float:
+    """Convert Meteora timeframe strings like 5m or 1h into hours."""
+    timeframe = str(timeframe).strip().lower()
+    if timeframe.endswith("m"):
+        return float(timeframe[:-1]) / 60.0
+    if timeframe.endswith("h"):
+        return float(timeframe[:-1])
+    if timeframe.endswith("d"):
+        return float(timeframe[:-1]) * 24.0
+    raise ValueError(f"Unsupported timeframe: {timeframe}")
+
+
+def generate_rolling_windows(
+    candles: pd.DataFrame,
+    timeframe: str,
+    window_hours: float,
+    step_hours: float,
+) -> list[tuple[int, int]]:
+    """Generate inclusive-exclusive rolling window index pairs."""
+    if candles.empty:
+        return []
+
+    candle_hours = timeframe_to_hours(timeframe)
+    window_candles = max(int(round(window_hours / candle_hours)), 1)
+    step_candles = max(int(round(step_hours / candle_hours)), 1)
+
+    if len(candles) < window_candles:
+        return []
+
+    windows = []
+    for start_idx in range(0, len(candles) - window_candles + 1, step_candles):
+        end_idx = start_idx + window_candles
+        windows.append((start_idx, end_idx))
+
+    last_start = len(candles) - window_candles
+    if windows and windows[-1][0] != last_start:
+        windows.append((last_start, len(candles)))
+
+    return windows
+
+
 def compute_metrics(results: dict) -> dict:
     """
     Compute strategy performance metrics from backtest results.
@@ -433,6 +474,73 @@ def compute_metrics(results: dict) -> dict:
         "final_portfolio_value_usd": round(
             results.get("final_portfolio_value_usd", initial_capital), 4
         ),
+    }
+
+
+def aggregate_window_metrics(
+    window_metrics: list[dict],
+    objective: str = "balanced",
+    window_hours: float | None = None,
+    step_hours: float | None = None,
+) -> dict:
+    """Aggregate many rolling-window metric dicts into one v3 summary."""
+    if not window_metrics:
+        raise ValueError("No window metrics to aggregate.")
+
+    objective = (objective or config.DEFAULT_EVAL_OBJECTIVE).strip().lower()
+    scores = pd.Series([m["net_pnl_pct"] for m in window_metrics], dtype="float64")
+    aprs = pd.Series([m["net_apr"] for m in window_metrics], dtype="float64")
+    time_in_range = pd.Series([m["time_in_range_pct"] for m in window_metrics], dtype="float64")
+    rebalances = pd.Series([m["num_rebalances"] for m in window_metrics], dtype="float64")
+    pnl_usd = pd.Series([m["net_pnl_usd"] for m in window_metrics], dtype="float64")
+    fees = pd.Series([m["total_fees_usd"] for m in window_metrics], dtype="float64")
+    il = pd.Series([m["total_il_usd"] for m in window_metrics], dtype="float64")
+
+    median_score = float(scores.median())
+    mean_score = float(scores.mean())
+    p25_score = float(scores.quantile(0.25))
+    worst_score = float(scores.min())
+    best_score = float(scores.max())
+    latest_score = float(scores.iloc[-1])
+
+    if objective == "median":
+        primary_score = median_score
+    elif objective == "mean":
+        primary_score = mean_score
+    elif objective == "worst":
+        primary_score = worst_score
+    else:
+        objective = "balanced"
+        primary_score = (median_score + p25_score) / 2.0
+
+    return {
+        "primary_metric_name": f"rolling_{objective}_net_pnl_pct",
+        "primary_metric_value": round(primary_score, 4),
+        "net_pnl_pct": round(primary_score, 4),
+        "net_pnl_usd": round(float(pnl_usd.mean()), 4),
+        "total_fees_usd": round(float(fees.mean()), 4),
+        "total_il_usd": round(float(il.mean()), 4),
+        "gross_apr": round(float(pd.Series([m["gross_apr"] for m in window_metrics], dtype="float64").mean()), 2),
+        "net_apr": round(float(aprs.mean()), 2),
+        "num_rebalances": round(float(rebalances.mean()), 2),
+        "time_in_range_pct": round(float(time_in_range.mean()), 2),
+        "fee_per_rebalance": round(float(pd.Series([m["fee_per_rebalance"] for m in window_metrics], dtype="float64").mean()), 4),
+        "final_portfolio_value_usd": round(float(pd.Series([m["final_portfolio_value_usd"] for m in window_metrics], dtype="float64").mean()), 4),
+        "eval_mode": "rolling",
+        "rolling_objective": objective,
+        "window_count": int(len(window_metrics)),
+        "window_hours": float(window_hours) if window_hours is not None else None,
+        "step_hours": float(step_hours) if step_hours is not None else None,
+        "avg_net_pnl_pct": round(mean_score, 4),
+        "median_net_pnl_pct": round(median_score, 4),
+        "p25_net_pnl_pct": round(p25_score, 4),
+        "worst_net_pnl_pct": round(worst_score, 4),
+        "best_net_pnl_pct": round(best_score, 4),
+        "latest_window_net_pnl_pct": round(latest_score, 4),
+        "win_rate_pct": round(float((scores >= 0).mean() * 100), 2),
+        "std_net_pnl_pct": round(float(scores.std(ddof=0)) if len(scores) > 1 else 0.0, 4),
+        "avg_time_in_range_pct": round(float(time_in_range.mean()), 2),
+        "avg_num_rebalances": round(float(rebalances.mean()), 2),
     }
 
 

@@ -93,6 +93,30 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Skip LP Agent data during auto-prepare.",
     )
+    parser.add_argument(
+        "--eval-mode",
+        default=config.DEFAULT_EVAL_MODE,
+        choices=["split", "rolling"],
+        help="Evaluation mode used by backtest.py.",
+    )
+    parser.add_argument(
+        "--window-hours",
+        type=float,
+        default=None,
+        help="Rolling evaluation window length in hours.",
+    )
+    parser.add_argument(
+        "--start-every-hours",
+        type=float,
+        default=None,
+        help="Rolling evaluation step between entry starts in hours.",
+    )
+    parser.add_argument(
+        "--objective",
+        default=config.DEFAULT_EVAL_OBJECTIVE,
+        choices=["balanced", "median", "mean", "worst"],
+        help="Primary objective for rolling evaluation.",
+    )
     return parser.parse_args()
 
 
@@ -251,18 +275,37 @@ def latest_val_result(before: set[str] | None = None) -> Path:
     return candidates[-1]
 
 
-def run_backtest(pool_address: str, horizon_mode: str) -> tuple[dict, Path]:
+def metric_name(metrics: dict) -> str:
+    return metrics.get("primary_metric_name", "net_pnl_pct")
+
+
+def metric_value(metrics: dict) -> float:
+    return float(metrics.get("primary_metric_value", metrics.get("net_pnl_pct", float("-inf"))))
+
+
+def run_backtest(args: argparse.Namespace, horizon_mode: str) -> tuple[dict, Path]:
     config.EXPERIMENTS_DIR.mkdir(exist_ok=True)
     before = {path.name for path in config.EXPERIMENTS_DIR.glob("*_val.json")}
+    horizon = config.resolve_horizon_settings(horizon_mode)
+    window_hours = args.window_hours if args.window_hours is not None else horizon["eval_window_hours"]
+    step_hours = args.start_every_hours if args.start_every_hours is not None else horizon["eval_step_hours"]
     command = [
         sys.executable,
         "backtest.py",
         "--split",
         "both",
         "--pool",
-        pool_address,
+        args.pool,
         "--horizon",
         horizon_mode,
+        "--eval-mode",
+        args.eval_mode,
+        "--window-hours",
+        str(window_hours),
+        "--start-every-hours",
+        str(step_hours),
+        "--objective",
+        args.objective,
     ]
     run_command(command, "backtest.py")
     val_file = latest_val_result(before)
@@ -285,7 +328,7 @@ def best_metric() -> float:
             record = json.loads(line)
             if record.get("label") not in {"val", "validation set"}:
                 continue
-            metric = record.get("metrics", {}).get("net_pnl_pct", float("-inf"))
+            metric = metric_value(record.get("metrics", {}))
             best = max(best, metric)
     return best
 
@@ -307,8 +350,9 @@ def build_prompt(
 Round: {round_num}
 Pool: {args.pool}
 Horizon mode: {args.horizon}
-Current best validation net_pnl_pct: {best_val:+.4f}%
-Last attempted validation net_pnl_pct: {last_val:+.4f}%
+Evaluation mode: {args.eval_mode}
+Current best validation score: {best_val:+.4f}%
+Last attempted validation score: {last_val:+.4f}%
 
 You are operating inside the repo at {ROOT}.
 Modify only strategy.py.
@@ -364,18 +408,26 @@ def main() -> None:
     print("=" * 60)
     print(f"  Pool:       {args.pool}")
     print(f"  Horizon:    {config.normalize_horizon_mode(args.horizon)}")
+    print(f"  Eval Mode:  {args.eval_mode}")
+    if args.eval_mode == "rolling":
+        horizon = config.resolve_horizon_settings(args.horizon)
+        window_hours = args.window_hours if args.window_hours is not None else horizon["eval_window_hours"]
+        step_hours = args.start_every_hours if args.start_every_hours is not None else horizon["eval_step_hours"]
+        print(f"  Window:     {window_hours:g}h")
+        print(f"  Step:       {step_hours:g}h")
+        print(f"  Objective:  {args.objective}")
     print(f"  Rounds:     {args.rounds}")
     print(f"  Sleep:      {args.sleep_seconds:.1f}s")
     print(f"  Strategy:   {STRATEGY_FILE}")
     print()
 
     best_source = STRATEGY_FILE.read_text()
-    baseline_metrics, baseline_file = run_backtest(args.pool, config.normalize_horizon_mode(args.horizon))
-    best_val = baseline_metrics["net_pnl_pct"]
+    baseline_metrics, baseline_file = run_backtest(args, config.normalize_horizon_mode(args.horizon))
+    best_val = metric_value(baseline_metrics)
     last_val = best_val
 
     print(
-        f"\n[baseline] Validation net_pnl_pct: {best_val:+.4f}% "
+        f"\n[baseline] Validation {metric_name(baseline_metrics)}: {best_val:+.4f}% "
         f"({baseline_file.name})"
     )
 
@@ -437,8 +489,8 @@ def main() -> None:
                 time.sleep(args.sleep_seconds)
             continue
 
-        metrics, val_file = run_backtest(args.pool, config.normalize_horizon_mode(args.horizon))
-        last_val = metrics["net_pnl_pct"]
+        metrics, val_file = run_backtest(args, config.normalize_horizon_mode(args.horizon))
+        last_val = metric_value(metrics)
         improved = last_val > (best_val + args.min_improvement)
 
         if improved:
@@ -447,14 +499,14 @@ def main() -> None:
             status = "kept"
             print(
                 f"\n[round {round_num}] kept change: "
-                f"val net_pnl_pct improved to {last_val:+.4f}%"
+                f"{metric_name(metrics)} improved to {last_val:+.4f}%"
             )
         else:
             STRATEGY_FILE.write_text(best_source)
             status = "reverted"
             print(
                 f"\n[round {round_num}] reverted change: "
-                f"trial val net_pnl_pct {last_val:+.4f}% did not beat best {best_val:+.4f}%"
+                f"trial {metric_name(metrics)} {last_val:+.4f}% did not beat best {best_val:+.4f}%"
             )
 
         append_loop_record(
@@ -475,7 +527,10 @@ def main() -> None:
             time.sleep(args.sleep_seconds)
 
     print("\n" + "=" * 60)
-    print(f"  Best validation net_pnl_pct: {best_val:+.4f}%")
+    metric_label = "validation score"
+    if args.eval_mode == "split":
+        metric_label = "validation net_pnl_pct"
+    print(f"  Best {metric_label}: {best_val:+.4f}%")
     print(f"  Loop history: {LOOP_HISTORY_FILE}")
     print("=" * 60)
 
