@@ -19,6 +19,16 @@ import config
 
 # ─── Meteora API (public, no auth) ──────────────────────────────────────────
 
+TIMEFRAME_SECONDS = {
+    "5m": 300,
+    "30m": 1800,
+    "1h": 3600,
+    "2h": 7200,
+    "4h": 14400,
+    "12h": 43200,
+    "24h": 86400,
+}
+
 def meteora_get(endpoint: str, params: dict = None) -> dict:
     """GET from Meteora DLMM API with rate limiting."""
     url = f"{config.METEORA_API}{endpoint}"
@@ -26,6 +36,60 @@ def meteora_get(endpoint: str, params: dict = None) -> dict:
     resp = requests.get(url, params=params, timeout=30)
     resp.raise_for_status()
     return resp.json()
+
+
+def _merge_timeseries_rows(chunks: list[list[dict]]) -> list[dict]:
+    """Merge chunked Meteora responses and deduplicate by timestamp."""
+    merged = {}
+    for rows in chunks:
+        for row in rows:
+            key = row.get("timestamp", row.get("timestamp_str"))
+            merged[key] = row
+    return [merged[key] for key in sorted(merged)]
+
+
+def meteora_timeseries_get(
+    endpoint: str,
+    timeframe: str,
+    start_time: int = None,
+    end_time: int = None,
+) -> list:
+    """Fetch Meteora timeseries, chunking long ranges when the API rejects them."""
+    params = {"timeframe": timeframe}
+    if start_time:
+        params["start_time"] = start_time
+    if end_time:
+        params["end_time"] = end_time
+
+    try:
+        data = meteora_get(endpoint, params=params)
+        return data.get("data", data) if isinstance(data, dict) else data
+    except requests.HTTPError as exc:
+        response = exc.response
+        body = response.text.lower() if response is not None and response.text else ""
+        if (
+            response is None
+            or response.status_code != 400
+            or "time range too large" not in body
+            or start_time is None
+            or end_time is None
+        ):
+            raise
+
+        step = TIMEFRAME_SECONDS.get(timeframe, 3600)
+        if end_time - start_time <= step:
+            raise
+
+        midpoint = start_time + ((end_time - start_time) // 2)
+        midpoint -= midpoint % step
+        if midpoint <= start_time:
+            midpoint = start_time + step
+        if midpoint >= end_time:
+            midpoint = end_time - step
+
+        left = meteora_timeseries_get(endpoint, timeframe, start_time=start_time, end_time=midpoint)
+        right = meteora_timeseries_get(endpoint, timeframe, start_time=midpoint, end_time=end_time)
+        return _merge_timeseries_rows([left, right])
 
 
 def fetch_pool_info(pool_address: str) -> dict:
@@ -37,27 +101,25 @@ def fetch_pool_info(pool_address: str) -> dict:
 def fetch_ohlcv(pool_address: str, timeframe: str = "1h",
                 start_time: int = None, end_time: int = None) -> list:
     """Fetch OHLCV candle data for a pool."""
-    params = {"timeframe": timeframe}
-    if start_time:
-        params["start_time"] = start_time
-    if end_time:
-        params["end_time"] = end_time
     print(f"  Fetching OHLCV ({timeframe})...")
-    data = meteora_get(f"/pools/{pool_address}/ohlcv", params=params)
-    return data.get("data", data) if isinstance(data, dict) else data
+    return meteora_timeseries_get(
+        f"/pools/{pool_address}/ohlcv",
+        timeframe,
+        start_time=start_time,
+        end_time=end_time,
+    )
 
 
 def fetch_volume_history(pool_address: str, timeframe: str = "1h",
                          start_time: int = None, end_time: int = None) -> list:
     """Fetch volume history for a pool."""
-    params = {"timeframe": timeframe}
-    if start_time:
-        params["start_time"] = start_time
-    if end_time:
-        params["end_time"] = end_time
     print(f"  Fetching volume history ({timeframe})...")
-    data = meteora_get(f"/pools/{pool_address}/volume/history", params=params)
-    return data.get("data", data) if isinstance(data, dict) else data
+    return meteora_timeseries_get(
+        f"/pools/{pool_address}/volume/history",
+        timeframe,
+        start_time=start_time,
+        end_time=end_time,
+    )
 
 
 # ─── LP Agent API (key-authenticated) ───────────────────────────────────────

@@ -71,7 +71,9 @@ Supported modes:
 - `scalp`: `5m` candles, 7-day lookback, benchmark LPs held roughly `0` to `6` hours
 - `intraday`: `30m` candles, 14-day lookback, benchmark LPs held roughly `6` to `36` hours
 - `swing`: `1h` candles, 30-day lookback, benchmark LPs held roughly `36` to `168` hours
-- `7d_hold`: `1h` candles, 45-day lookback, benchmark LPs held roughly `72` to `240` hours
+- `7d_profile`: `1h` candles, 45-day lookback, benchmark LPs held roughly `72` to `240` hours
+
+`7d_profile` is a multi-day hold preset, not a literal rolling 7-day evaluator. The strategy is tuned with slower defaults and longer-hold LP benchmarks, while the backtest still runs over the prepared history window. The old name `7d_hold` still works as a backward-compatible alias.
 
 If you also pass `--days` or `--timeframe`, those explicit flags override the preset defaults.
 
@@ -92,16 +94,16 @@ uv run loop.py --rounds 20 \
 ```bash
 uv run prepare.py \
   --pool 81GpCm4d13y8TozYtThabuSCLQN2o3bbrvDogXFPn8sA \
-  --horizon 7d_hold
+  --horizon 7d_profile
 
 uv run backtest.py \
   --pool 81GpCm4d13y8TozYtThabuSCLQN2o3bbrvDogXFPn8sA \
-  --horizon 7d_hold \
+  --horizon 7d_profile \
   --split both
 
 uv run loop.py \
   --pool 81GpCm4d13y8TozYtThabuSCLQN2o3bbrvDogXFPn8sA \
-  --horizon 7d_hold \
+  --horizon 7d_profile \
   --rounds 25 \
   --sleep-seconds 300 \
   --agent-cmd 'codex exec $(cat {prompt_file})'
@@ -121,7 +123,8 @@ When you switch pools, run `prepare.py`, `backtest.py`, and `loop.py` with the s
 ### `prepare.py`
 
 - `--pool <POOL_ADDRESS>`: choose the pool to cache and benchmark
-- `--horizon <MODE>`: one of `scalp`, `intraday`, `swing`, `7d_hold`
+- `--horizon <MODE>`: one of `scalp`, `intraday`, `swing`, `7d_profile`
+- `7d_hold` is accepted as an alias for `7d_profile`
 - `--days <N>`: override the preset lookback window
 - `--timeframe <5m|30m|1h|2h|4h|12h|24h>`: override the preset candle resolution
 - `--top-wallets <N>`: number of top LP wallets to deep-dive for position history
@@ -201,7 +204,7 @@ This keeps the project lightweight while making the search process cumulative.
 5. revert regressions automatically
 6. repeat for the requested number of rounds
 
-It is single-pool by design in `v2`, which is usually what you want for meme pools because each pool has very different volatility, fee behavior, and rebalance patterns. The new `--horizon` flag lets the same repo behave very differently for `scalp` versus `7d_hold`.
+It is single-pool by design in `v2`, which is usually what you want for meme pools because each pool has very different volatility, fee behavior, and rebalance patterns. The new `--horizon` flag lets the same repo behave very differently for `scalp` versus `7d_profile`.
 
 Example:
 
@@ -238,7 +241,7 @@ The `v2` work added six pieces:
    `loop.py` shells out to a coding agent, evaluates each proposed strategy change, and automatically keeps or reverts it based on validation performance.
 
 6. Horizon-aware optimization.
-   `config.py` now defines horizon presets, `prepare.py` filters LP benchmarks to matching hold times, `backtest.py` injects the selected horizon into strategy runtime context, and `strategy.py` adopts slower multi-day defaults for modes like `7d_hold` unless the agent has already tuned them away.
+   `config.py` now defines horizon presets, `prepare.py` filters LP benchmarks to matching hold times, `backtest.py` injects the selected horizon into strategy runtime context, and `strategy.py` adopts slower multi-day defaults for modes like `7d_profile` unless the agent has already tuned them away.
 
 ## What the Agent Experiments With
 

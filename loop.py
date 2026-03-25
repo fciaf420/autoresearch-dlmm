@@ -28,6 +28,7 @@ import json
 import math
 import os
 import shlex
+import signal
 import subprocess
 import sys
 import time
@@ -147,6 +148,96 @@ def run_command(command, label: str, shell: bool = False) -> subprocess.Complete
             print(completed.stderr.rstrip(), file=sys.stderr)
         raise RuntimeError(f"{label} failed with exit code {completed.returncode}")
     return completed
+
+
+def terminate_process_group(process: subprocess.Popen, label: str) -> None:
+    if process.poll() is not None:
+        return
+
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+        process.wait(timeout=5)
+        print(f"[{label}] terminated lingering agent process after edit settled.")
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGKILL)
+        process.wait(timeout=5)
+        print(f"[{label}] killed lingering agent process after edit settled.")
+
+
+def run_agent_round(
+    command: str,
+    label: str,
+    watched_file: Path,
+    settle_seconds: float = 12.0,
+    timeout_seconds: float = 900.0,
+) -> dict:
+    print(f"\n[{label}]")
+    print(command)
+
+    pre_round_source = watched_file.read_text()
+    last_source = pre_round_source
+    edit_stable_since = None
+    started_at = time.monotonic()
+
+    process = subprocess.Popen(
+        command,
+        cwd=ROOT,
+        shell=True,
+        text=True,
+        start_new_session=True,
+    )
+
+    while True:
+        return_code = process.poll()
+        current_source = watched_file.read_text()
+        changed = current_source != pre_round_source
+
+        if changed:
+            if current_source != last_source:
+                edit_stable_since = time.monotonic()
+                last_source = current_source
+            elif edit_stable_since is None:
+                edit_stable_since = time.monotonic()
+        else:
+            last_source = current_source
+            edit_stable_since = None
+
+        if return_code is not None:
+            if return_code != 0 and not changed:
+                raise RuntimeError(f"{label} failed with exit code {return_code}")
+            if return_code != 0:
+                print(f"[{label}] agent exited with code {return_code} after editing strategy.py; continuing.")
+            return {
+                "changed": changed,
+                "forced_exit": False,
+                "exit_code": return_code,
+            }
+
+        if changed and edit_stable_since is not None:
+            stable_for = time.monotonic() - edit_stable_since
+            if stable_for >= settle_seconds:
+                terminate_process_group(process, label)
+                return {
+                    "changed": True,
+                    "forced_exit": True,
+                    "exit_code": 0,
+                }
+
+        elapsed = time.monotonic() - started_at
+        if elapsed >= timeout_seconds:
+            if changed:
+                print(f"[{label}] timed out after {timeout_seconds:.0f}s, but strategy.py changed; continuing.")
+                terminate_process_group(process, label)
+                return {
+                    "changed": True,
+                    "forced_exit": True,
+                    "exit_code": 0,
+                }
+
+            terminate_process_group(process, label)
+            raise RuntimeError(f"{label} timed out after {timeout_seconds:.0f}s without editing strategy.py")
+
+        time.sleep(1)
 
 
 def latest_val_result(before: set[str] | None = None) -> Path:
@@ -289,6 +380,17 @@ def main() -> None:
     )
 
     for round_num in range(1, args.rounds + 1):
+        append_loop_record(
+            {
+                "recorded_at": datetime.now(timezone.utc).isoformat(),
+                "round": round_num,
+                "pool_address": args.pool,
+                "status": "started",
+                "best_val_net_pnl_pct": best_val,
+                "last_val_net_pnl_pct": last_val,
+            }
+        )
+
         prompt = build_prompt(args, round_num, best_val, last_val)
         prompt_file = LOOP_PROMPT_DIR / f"round_{round_num:03d}.md"
         prompt_file.write_text(prompt)
@@ -305,7 +407,7 @@ def main() -> None:
         )
 
         try:
-            run_command(command, f"agent round {round_num}", shell=True)
+            agent_result = run_agent_round(command, f"agent round {round_num}", STRATEGY_FILE)
         except Exception as exc:
             append_loop_record(
                 {
@@ -328,6 +430,7 @@ def main() -> None:
                     "pool_address": args.pool,
                     "status": "no_change",
                     "best_val_net_pnl_pct": best_val,
+                    "agent_forced_exit": agent_result["forced_exit"],
                 }
             )
             if args.sleep_seconds > 0 and round_num < args.rounds:
@@ -362,6 +465,7 @@ def main() -> None:
                 "status": status,
                 "trial_val_net_pnl_pct": last_val,
                 "best_val_net_pnl_pct": best_val,
+                "agent_forced_exit": agent_result["forced_exit"],
                 "result_file": str(val_file),
                 "prompt_file": str(prompt_file),
             }

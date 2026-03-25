@@ -92,7 +92,7 @@ HORIZON_PRESETS = {
             "VOLATILITY_WINDOW": 24,
         },
     },
-    "7d_hold": {
+    "7d_profile": {
         "timeframe": "1h",
         "days": 45,
         "hold_min_hours": 72.0,
@@ -108,10 +108,15 @@ HORIZON_PRESETS = {
     },
 }
 
+HORIZON_ALIASES = {
+    "7d_hold": "7d_profile",
+}
+
 
 def normalize_horizon_mode(mode: str | None) -> str:
     """Return a supported horizon mode, falling back to the configured default."""
     mode = (mode or HORIZON_MODE or "swing").strip().lower()
+    mode = HORIZON_ALIASES.get(mode, mode)
     if mode not in HORIZON_PRESETS:
         raise ValueError(
             f"Unknown horizon mode: {mode}. "
